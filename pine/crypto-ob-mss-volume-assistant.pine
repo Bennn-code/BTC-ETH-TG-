@@ -1,0 +1,231 @@
+//@version=6
+indicator("Crypto OB + MSS + Volume Assistant v3", shorttitle = "OB MSS Vol v3", overlay = false, max_boxes_count = 100, max_labels_count = 100)
+
+// Inputs
+swingLen = input.int(3, "MSS Swing Length", minval = 1)
+volLen = input.int(30, "Volume MA Length", minval = 1)
+volMult = input.float(1.3, "Volume Spike Multiplier", minval = 0.1, step = 0.1)
+atrLen = input.int(14, "ATR Length", minval = 1)
+bodyAtrMult = input.float(0.5, "Body ATR Multiplier", minval = 0.1, step = 0.1)
+mssBreakAtrMult = input.float(0.1, "MSS Break ATR Multiplier", minval = 0.0, step = 0.05)
+mssCooldownBars = input.int(10, "MSS Cooldown Bars", minval = 0)
+maxObBoxes = input.int(10, "Max OB Boxes Each Side", minval = 1, maxval = 50)
+obLookback = input.int(20, "OB Search Lookback", minval = 1, maxval = 100)
+
+showOb = input.bool(true, "Show OB Boxes")
+showMss = input.bool(true, "Show MSS Labels")
+showSignals = input.bool(true, "Show Buy/Sell Triangles")
+confirmOnClose = input.bool(true, "Confirm Signals On Bar Close")
+
+// Core volume / imbalance
+volMa = ta.sma(volume, volLen)
+volSpike = volume > volMa * volMult
+
+atr = ta.atr(atrLen)
+body = math.abs(close - open)
+
+bullImbalance = close > open and body > atr * bodyAtrMult
+bearImbalance = close < open and body > atr * bodyAtrMult
+
+confirmed = not confirmOnClose or barstate.isconfirmed
+
+// Swing structure
+pivotHigh = ta.pivothigh(high, swingLen, swingLen)
+pivotLow = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var bool highBroken = false
+var bool lowBroken = false
+
+if not na(pivotHigh)
+    lastSwingHigh := pivotHigh
+    highBroken := false
+
+if not na(pivotLow)
+    lastSwingLow := pivotLow
+    lowBroken := false
+
+rawBullMss = confirmed and not na(lastSwingHigh) and not highBroken and close > lastSwingHigh + atr * mssBreakAtrMult
+rawBearMss = confirmed and not na(lastSwingLow) and not lowBroken and close < lastSwingLow - atr * mssBreakAtrMult
+
+// MSS cooldown
+var int lastMssBar = na
+cooldownPassed = na(lastMssBar) or bar_index - lastMssBar > mssCooldownBars
+
+validBullMss = rawBullMss and volSpike and bullImbalance and cooldownPassed
+validBearMss = rawBearMss and volSpike and bearImbalance and cooldownPassed
+
+if rawBullMss
+    highBroken := true
+
+if rawBearMss
+    lowBroken := true
+
+if validBullMss or validBearMss
+    lastMssBar := bar_index
+
+// Find recent opposite candle as OB
+float bullObHigh = na
+float bullObLow = na
+int bullObBar = na
+
+if validBullMss
+    for i = 1 to obLookback
+        if na(bullObBar) and close[i] < open[i]
+            bullObHigh := high[i]
+            bullObLow := low[i]
+            bullObBar := bar_index - i
+
+float bearObHigh = na
+float bearObLow = na
+int bearObBar = na
+
+if validBearMss
+    for i = 1 to obLookback
+        if na(bearObBar) and close[i] > open[i]
+            bearObHigh := high[i]
+            bearObLow := low[i]
+            bearObBar := bar_index - i
+
+bullObFound = not na(bullObBar)
+bearObFound = not na(bearObBar)
+
+// Signals
+buySignal = validBullMss and bullObFound
+sellSignal = validBearMss and bearObFound
+
+// OB box storage
+var box[] bullBoxes = array.new_box()
+var float[] bullBoxLows = array.new_float()
+var bool[] bullBoxActive = array.new_bool()
+
+var box[] bearBoxes = array.new_box()
+var float[] bearBoxHighs = array.new_float()
+var bool[] bearBoxActive = array.new_bool()
+
+// Create bullish OB
+if showOb and validBullMss and bullObFound
+    b = box.new(
+         left = bullObBar,
+         top = bullObHigh,
+         right = bar_index,
+         bottom = bullObLow,
+         xloc = xloc.bar_index,
+         bgcolor = color.new(color.green, 84),
+         border_color = color.new(color.green, 20),
+         force_overlay = true
+     )
+    array.push(bullBoxes, b)
+    array.push(bullBoxLows, bullObLow)
+    array.push(bullBoxActive, true)
+
+    if array.size(bullBoxes) > maxObBoxes
+        oldBox = array.shift(bullBoxes)
+        array.shift(bullBoxLows)
+        array.shift(bullBoxActive)
+        box.delete(oldBox)
+
+// Create bearish OB
+if showOb and validBearMss and bearObFound
+    b = box.new(
+         left = bearObBar,
+         top = bearObHigh,
+         right = bar_index,
+         bottom = bearObLow,
+         xloc = xloc.bar_index,
+         bgcolor = color.new(color.red, 84),
+         border_color = color.new(color.red, 20),
+         force_overlay = true
+     )
+    array.push(bearBoxes, b)
+    array.push(bearBoxHighs, bearObHigh)
+    array.push(bearBoxActive, true)
+
+    if array.size(bearBoxes) > maxObBoxes
+        oldBox = array.shift(bearBoxes)
+        array.shift(bearBoxHighs)
+        array.shift(bearBoxActive)
+        box.delete(oldBox)
+
+// Extend active bullish OB until invalidated
+if array.size(bullBoxes) > 0
+    for i = 0 to array.size(bullBoxes) - 1
+        b = array.get(bullBoxes, i)
+        obLow = array.get(bullBoxLows, i)
+        isActive = array.get(bullBoxActive, i)
+
+        if isActive
+            if close < obLow
+                array.set(bullBoxActive, i, false)
+            else
+                box.set_right(b, bar_index)
+
+// Extend active bearish OB until invalidated
+if array.size(bearBoxes) > 0
+    for i = 0 to array.size(bearBoxes) - 1
+        b = array.get(bearBoxes, i)
+        obHigh = array.get(bearBoxHighs, i)
+        isActive = array.get(bearBoxActive, i)
+
+        if isActive
+            if close > obHigh
+                array.set(bearBoxActive, i, false)
+            else
+                box.set_right(b, bar_index)
+
+// MSS labels
+if showMss and validBullMss
+    label.new(
+         x = bar_index,
+         y = high,
+         text = "Bullish MSS",
+         style = label.style_label_down,
+         color = color.new(color.green, 10),
+         textcolor = color.white,
+         size = size.tiny,
+         force_overlay = true
+     )
+
+if showMss and validBearMss
+    label.new(
+         x = bar_index,
+         y = low,
+         text = "Bearish MSS",
+         style = label.style_label_up,
+         color = color.new(color.red, 10),
+         textcolor = color.white,
+         size = size.tiny,
+         force_overlay = true
+     )
+
+// Buy / Sell triangles, no text
+plotshape(
+     showSignals and buySignal,
+     title = "Buy Triangle",
+     style = shape.triangleup,
+     location = location.belowbar,
+     color = color.lime,
+     size = size.small,
+     force_overlay = true
+ )
+
+plotshape(
+     showSignals and sellSignal,
+     title = "Sell Triangle",
+     style = shape.triangledown,
+     location = location.abovebar,
+     color = color.red,
+     size = size.small,
+     force_overlay = true
+ )
+
+// Volume pane: orange column only when volume spike
+volColor = volSpike ? color.orange : close >= open ? color.new(color.green, 35) : color.new(color.red, 35)
+
+plot(volume, title = "Volume", style = plot.style_columns, color = volColor)
+plot(volMa, title = "Volume SMA", color = color.new(color.aqua, 0), linewidth = 2)
+
+// Telegram-ready alerts. Put your JSON message in TradingView alert settings.
+alertcondition(buySignal, title = "Bullish Entry Signal", message = "Bullish OB + MSS + Volume signal")
+alertcondition(sellSignal, title = "Bearish Sell Signal", message = "Bearish OB + MSS + Volume signal")
